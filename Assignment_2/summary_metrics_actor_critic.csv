@@ -1,0 +1,2 @@
+total_episodes,best_ma_reward,eval_mean_reward,eval_std_reward,eval_success_rate_pct,eval_mean_ep_length,avg_steps_to_goal,training_time_sec,sample_efficiency_ep,final_critic_loss,final_actor_loss,final_mean_abs_td_error,final_entropy
+1000,-81.14,-87.06,31.05,100.0,88.1,88.1,1416.4,104,7.7405,-4.6307,1.877,0.1307
