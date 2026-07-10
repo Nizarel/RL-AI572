@@ -10,8 +10,20 @@ Run:
 
 Output artifacts:
     results.csv          — per-episode training history
+    summary_metrics.csv  — final metric table for comparisons
+    checkpoint_success.csv — periodic greedy-evaluation success rates
     figures/             — four PNG plots
-    Console summary      — 7 key metrics
+    Console summary      — key metrics
+
+Performance metrics tracked:
+    episode return, moving-average return, episode length, success flag,
+    checkpoint success rate, final evaluation mean/std reward, final
+    evaluation success rate, final evaluation mean episode length, training
+    time, and sample-efficiency threshold crossing.
+
+Visualizations generated:
+    reward curve, episode-length curve, checkpoint success-rate curve,
+    and epsilon-decay curve.
 """
 
 import os
@@ -57,6 +69,7 @@ CONFIG = {
 def make_env(seed: int) -> gym.Env:
     env = gym.make("Acrobot-v1")
     env.reset(seed=seed)
+    env.action_space.seed(seed)
     print(f"Observation space : {env.observation_space}")
     print(f"Action space      : {env.action_space}")
     return env
@@ -66,7 +79,8 @@ def discretize_state(state: np.ndarray, cfg: dict) -> tuple:
     """Convert a continuous 6-D observation to a discrete tuple index."""
     clipped = np.clip(state, cfg["state_low"], cfg["state_high"])
     ratios  = (clipped - cfg["state_low"]) / (cfg["state_high"] - cfg["state_low"])
-    indices = (ratios * (cfg["num_bins"] - 1)).astype(int)
+    indices = np.floor(ratios * cfg["num_bins"]).astype(int)
+    indices = np.clip(indices, 0, cfg["num_bins"] - 1)
     return tuple(indices)
 
 
@@ -86,10 +100,10 @@ def init_q_table(cfg: dict, action_size: int) -> np.ndarray:
     return np.zeros(shape)
 
 
-def choose_action(q_table: np.ndarray, state_idx: tuple,
+def choose_action(rng: np.random.Generator, q_table: np.ndarray, state_idx: tuple,
                   epsilon: float, action_size: int) -> int:
-    if np.random.rand() < epsilon:
-        return np.random.randint(action_size)
+    if rng.random() < epsilon:
+        return int(rng.integers(action_size))
     return int(np.argmax(q_table[state_idx]))
 
 
@@ -111,22 +125,27 @@ def evaluate(env: gym.Env, q_table: np.ndarray, cfg: dict) -> dict:
     Run `eval_episodes` greedy episodes.
     Returns dict with keys: rewards, lengths, successes.
     """
+    eval_episodes = cfg["eval_episodes"]
+    max_steps = cfg["max_steps"]
     rewards, lengths, successes = [], [], []
-    for _ in range(cfg["eval_episodes"]):
+    for _ in range(eval_episodes):
         obs, _ = env.reset()
         state_idx = discretize_state(obs, cfg)
         total_reward = 0.0
-        for step in range(cfg["max_steps"]):
+        success = 0
+        for step in range(max_steps):
             action = int(np.argmax(q_table[state_idx]))
             obs, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
             state_idx = discretize_state(obs, cfg)
             total_reward += reward
+            if terminated:
+                success = 1
             if done:
-                rewards.append(total_reward)
-                lengths.append(step + 1)
-                successes.append(1 if terminated else 0)
                 break
+        rewards.append(total_reward)
+        lengths.append(step + 1)
+        successes.append(success)
     return {"rewards": rewards, "lengths": lengths, "successes": successes}
 
 
@@ -134,13 +153,21 @@ def evaluate(env: gym.Env, q_table: np.ndarray, cfg: dict) -> dict:
 # Phase 4 — Training loop
 # ---------------------------------------------------------------------------
 
-def train(env: gym.Env, q_table: np.ndarray, cfg: dict) -> tuple[np.ndarray, dict]:
+def train(env: gym.Env, eval_env: gym.Env, q_table: np.ndarray,
+          cfg: dict, rng: np.random.Generator) -> tuple[np.ndarray, dict]:
     """
     Train the agent. Returns (updated q_table, history).
     history keys: rewards, lengths, successes, epsilons, checkpoint_episodes,
                   checkpoint_success_rates, training_time.
     """
     epsilon = cfg["epsilon"]
+    action_size = env.action_space.n
+    alpha = cfg["alpha"]
+    gamma = cfg["gamma"]
+    max_steps = cfg["max_steps"]
+    ma_window = cfg["ma_window"]
+    eval_interval = cfg["eval_interval"]
+    num_episodes = cfg["num_episodes"]
     history = {
         "rewards":                  [],
         "lengths":                  [],
@@ -152,22 +179,21 @@ def train(env: gym.Env, q_table: np.ndarray, cfg: dict) -> tuple[np.ndarray, dic
 
     t_start = time.time()
 
-    for episode in range(1, cfg["num_episodes"] + 1):
+    for episode in range(1, num_episodes + 1):
         obs, _ = env.reset()
         state_idx = discretize_state(obs, cfg)
         total_reward = 0.0
         success = 0
-        ep_length = cfg["max_steps"]
+        ep_length = max_steps
 
-        for step in range(cfg["max_steps"]):
-            action = choose_action(q_table, state_idx, epsilon,
-                                   env.action_space.n)
+        for step in range(max_steps):
+            action = choose_action(rng, q_table, state_idx, epsilon, action_size)
             obs, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
             next_state_idx = discretize_state(obs, cfg)
 
             update_q(q_table, state_idx, action, reward, next_state_idx, done,
-                     cfg["alpha"], cfg["gamma"])
+                     alpha, gamma)
 
             state_idx = next_state_idx
             total_reward += reward
@@ -187,17 +213,17 @@ def train(env: gym.Env, q_table: np.ndarray, cfg: dict) -> tuple[np.ndarray, dic
         epsilon = max(cfg["epsilon_min"], epsilon * cfg["epsilon_decay"])
 
         # Periodic evaluation checkpoint
-        if episode % cfg["eval_interval"] == 0:
-            ckpt = evaluate(env, q_table, cfg)
+        if episode % eval_interval == 0:
+            ckpt = evaluate(eval_env, q_table, cfg)
             success_rate = 100.0 * sum(ckpt["successes"]) / len(ckpt["successes"])
             history["checkpoint_episodes"].append(episode)
             history["checkpoint_success_rates"].append(success_rate)
 
             # Progress print
-            recent_rewards = history["rewards"][-cfg["ma_window"]:]
+            recent_rewards = history["rewards"][-ma_window:]
             ma = np.mean(recent_rewards)
             print(
-                f"Episode {episode:5d}/{cfg['num_episodes']} | "
+                f"Episode {episode:5d}/{num_episodes} | "
                 f"MA Reward(100): {ma:8.1f} | "
                 f"Epsilon: {epsilon:.4f} | "
                 f"Eval success: {success_rate:.1f}%"
@@ -253,6 +279,21 @@ def save_csv(history: dict, path: str = "results.csv") -> None:
     })
     df.to_csv(path, index=False)
     print(f"Saved training history → {path}")
+
+
+def save_summary_csv(metrics: dict, path: str = "summary_metrics.csv") -> None:
+    df = pd.DataFrame([metrics])
+    df.to_csv(path, index=False)
+    print(f"Saved summary metrics → {path}")
+
+
+def save_checkpoint_csv(history: dict, path: str = "checkpoint_success.csv") -> None:
+    df = pd.DataFrame({
+        "episode": history["checkpoint_episodes"],
+        "success_rate_pct": history["checkpoint_success_rates"],
+    })
+    df.to_csv(path, index=False)
+    print(f"Saved checkpoint success rates → {path}")
 
 
 def print_summary(metrics: dict) -> None:
@@ -363,13 +404,15 @@ def plot_epsilon_decay(history: dict, out_dir: str) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    np.random.seed(CONFIG["seed"])
+    rng = np.random.default_rng(CONFIG["seed"])
     os.makedirs("figures", exist_ok=True)
 
     print("\n=== Q-Learning for Acrobot-v1 ===\n")
 
     # Phase 2
     env = make_env(CONFIG["seed"])
+    eval_env = gym.make("Acrobot-v1")
+    eval_env.reset(seed=CONFIG["seed"] + 1)
     _sanity_check_discretizer(env, CONFIG)
 
     # Phase 3
@@ -379,15 +422,17 @@ def main() -> None:
 
     # Phase 4 + 5 (training + periodic evaluation)
     print("Training ...\n")
-    q_table, history = train(env, q_table, CONFIG)
+    q_table, history = train(env, eval_env, q_table, CONFIG, rng)
 
     # Phase 5 — final evaluation
     print("\nRunning final evaluation ...")
-    final_eval = evaluate(env, q_table, CONFIG)
+    final_eval = evaluate(eval_env, q_table, CONFIG)
 
     # Phase 6
     metrics = compute_metrics(history, final_eval, CONFIG)
     save_csv(history)
+    save_summary_csv(metrics)
+    save_checkpoint_csv(history)
     print_summary(metrics)
 
     # Phase 7
@@ -397,8 +442,10 @@ def main() -> None:
     plot_success_rate(history, "figures")
     plot_epsilon_decay(history, "figures")
 
-    print("\nDone. See figures/ for plots and results.csv for training data.")
+    print("\nDone. See figures/ for plots, results.csv for training data, ")
+    print("summary_metrics.csv for final metrics, and checkpoint_success.csv for checkpoint results.")
     env.close()
+    eval_env.close()
 
 
 if __name__ == "__main__":
