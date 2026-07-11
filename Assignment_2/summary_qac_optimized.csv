@@ -1,0 +1,2 @@
+training_episodes,selected_checkpoint_episode,selected_checkpoint_success_rate_pct,best_ma_return,sample_efficiency_episode,final_eval_mean_return,final_eval_std_return,final_eval_success_rate_pct,final_eval_mean_length,mean_steps_to_goal,training_time_sec,final_critic_td_loss,final_mean_abs_td_error,final_policy_entropy
+1000,700,100.0,-87.84,61,-160.39,36.8779,100.0,161.39,161.39,1907.2334,8.9734,1.897,0.1885
