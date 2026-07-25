@@ -1,0 +1,2 @@
+episodes,mean_reward,last_window_mean_reward,mean_length,overall_success_pct,training_time_sec
+200,-414.345,-291.24,414.815,47.0,571.8189263343811
