@@ -1,0 +1,2 @@
+episodes,mean_reward,last_window_mean_reward,best_ma_reward,mean_length,overall_success_pct,sample_efficiency_ep,training_time_sec,device
+300,-116.44,-78.56,-77.75999999999999,117.4,96.0,38,193.17612314224243,cpu

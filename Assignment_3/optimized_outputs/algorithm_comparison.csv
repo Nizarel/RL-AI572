@@ -1,0 +1,4 @@
+algorithm,evaluation_basis,mean_reward,success_rate_pct,mean_episode_length
+DQN,30 greedy episodes,-79.2,100.0,80.2
+Actor-Critic,saved evaluation summary,-87.06,100.0,88.1
+Q-Actor-Critic,saved evaluation summary,-160.39,100.0,161.39
