@@ -1,2 +1,2 @@
-total_episodes,training_time_sec,final_epsilon
-1200,1513.4,0.05
+total_episodes,training_time_sec,final_epsilon,best_ma_reward,eval_mean_reward,eval_std_reward,eval_success_rate_pct,eval_mean_ep_length,sample_efficiency_ep
+400,1062.08,0.13466,-461.36,-500.0,0.0,0.0,500.0,-1

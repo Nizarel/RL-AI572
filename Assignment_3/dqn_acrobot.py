@@ -35,18 +35,18 @@ CONFIG = {
     "num_episodes": 400,
     "max_steps": 500,
     "eval_interval": 50,
-    "eval_episodes": 30,
+    "eval_episodes": 40,
     "gamma": 0.99,
     "epsilon_start": 1.0,
     "epsilon_min": 0.05,
     "epsilon_decay": 0.995,
-    "batch_size": 64,
+    "batch_size": 128,
     "learning_rate": 1e-3,
     "replay_capacity": 20000,
     "target_update": 10,
-    "hidden_dim": 128,
+    "hidden_dim": 64,
     "ma_window": 50,
-    "efficiency_threshold": -200.0,
+    "efficiency_threshold": -150.0,
 }
 
 
@@ -108,11 +108,17 @@ def make_env(seed: int) -> gym.Env:
     return env
 
 
+def preprocess_state(state: np.ndarray) -> np.ndarray:
+    state = np.asarray(state, dtype=np.float32)
+    scale = np.array([1.0, 1.0, 1.0, 1.0, 12.566371, 28.274334], dtype=np.float32)
+    return state / scale
+
+
 def choose_action(policy_net: DQN, state: np.ndarray, epsilon: float, action_size: int, device: torch.device) -> int:
     if np.random.random() < epsilon:
         return int(np.random.randint(action_size))
     with torch.no_grad():
-        state_tensor = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
+        state_tensor = torch.tensor(preprocess_state(state), dtype=torch.float32, device=device).unsqueeze(0)
         q_values = policy_net(state_tensor)
     return int(q_values.argmax().item())
 
@@ -172,6 +178,7 @@ def train(env: gym.Env, eval_env: gym.Env, cfg: Dict[str, float]) -> Tuple[Dict[
 
     for episode in range(1, int(cfg["num_episodes"]) + 1):
         obs, _ = env.reset()
+        obs = preprocess_state(obs)
         total_reward = 0.0
         success = 0
         ep_length = 0
@@ -179,9 +186,12 @@ def train(env: gym.Env, eval_env: gym.Env, cfg: Dict[str, float]) -> Tuple[Dict[
             action = choose_action(policy_net, obs, epsilon, action_size, device)
             next_obs, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
-            replay_buffer.push(obs, action, float(reward), next_obs, done)
-            obs = next_obs
-            total_reward += float(reward)
+            shaped_reward = float(reward)
+            if not done:
+                shaped_reward += -0.01 * np.linalg.norm(next_obs[:4])
+            replay_buffer.push(obs, action, shaped_reward, preprocess_state(next_obs), done)
+            obs = preprocess_state(next_obs)
+            total_reward += shaped_reward
             ep_length += 1
 
             if len(replay_buffer) >= int(cfg["batch_size"]):
@@ -193,6 +203,7 @@ def train(env: gym.Env, eval_env: gym.Env, cfg: Dict[str, float]) -> Tuple[Dict[
                 loss = F.mse_loss(q_values, target_q_values)
                 optimizer.zero_grad()
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(policy_net.parameters(), 5.0)
                 optimizer.step()
                 history["losses"].append(float(loss.item()))
 
