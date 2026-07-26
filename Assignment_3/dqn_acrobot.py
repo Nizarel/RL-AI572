@@ -31,22 +31,26 @@ FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 
 
 CONFIG = {
+    # Experiment control
     "seed": 42,
-    "num_episodes": 400,
+    "num_episodes": 300,
     "max_steps": 500,
-    "eval_interval": 50,
-    "eval_episodes": 40,
+    "eval_interval": 25,
+    "eval_episodes": 30,
+    "ma_window": 25,
+    "efficiency_threshold": -200.0,
+    # Refined DQN hyperparameters
     "gamma": 0.99,
+    "learning_rate": 5e-4,      # smoother Q updates than 1e-3
+    "batch_size": 128,          # lower gradient variance per step
+    "hidden_dim": 128,
+    "replay_capacity": 100000,  # keeps rare early successes available
+    "learning_starts": 1000,    # warm-up before the first gradient step
+    "tau": 0.005,               # Polyak soft target update every step
+    "grad_clip": 10.0,          # clip global gradient norm
     "epsilon_start": 1.0,
-    "epsilon_min": 0.05,
-    "epsilon_decay": 0.995,
-    "batch_size": 128,
-    "learning_rate": 1e-3,
-    "replay_capacity": 20000,
-    "target_update": 10,
-    "hidden_dim": 64,
-    "ma_window": 50,
-    "efficiency_threshold": -150.0,
+    "epsilon_min": 0.02,
+    "epsilon_decay": 0.97,      # reaches ~0.05 by episode 100
 }
 
 
@@ -108,17 +112,11 @@ def make_env(seed: int) -> gym.Env:
     return env
 
 
-def preprocess_state(state: np.ndarray) -> np.ndarray:
-    state = np.asarray(state, dtype=np.float32)
-    scale = np.array([1.0, 1.0, 1.0, 1.0, 12.566371, 28.274334], dtype=np.float32)
-    return state / scale
-
-
 def choose_action(policy_net: DQN, state: np.ndarray, epsilon: float, action_size: int, device: torch.device) -> int:
     if np.random.random() < epsilon:
         return int(np.random.randint(action_size))
     with torch.no_grad():
-        state_tensor = torch.tensor(preprocess_state(state), dtype=torch.float32, device=device).unsqueeze(0)
+        state_tensor = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
         q_values = policy_net(state_tensor)
     return int(q_values.argmax().item())
 
@@ -178,33 +176,34 @@ def train(env: gym.Env, eval_env: gym.Env, cfg: Dict[str, float]) -> Tuple[Dict[
 
     for episode in range(1, int(cfg["num_episodes"]) + 1):
         obs, _ = env.reset()
-        obs = preprocess_state(obs)
         total_reward = 0.0
         success = 0
         ep_length = 0
         for _ in range(int(cfg["max_steps"])):
             action = choose_action(policy_net, obs, epsilon, action_size, device)
             next_obs, reward, terminated, truncated, _ = env.step(action)
-            done = terminated or truncated
-            shaped_reward = float(reward)
-            if not done:
-                shaped_reward += -0.01 * np.linalg.norm(next_obs[:4])
-            replay_buffer.push(obs, action, shaped_reward, preprocess_state(next_obs), done)
-            obs = preprocess_state(next_obs)
-            total_reward += shaped_reward
+            # Only `terminated` blocks bootstrapping; the 500-step time-out is not a real terminal state.
+            replay_buffer.push(obs, action, float(reward), next_obs, terminated)
+            obs = next_obs
+            total_reward += float(reward)
             ep_length += 1
 
-            if len(replay_buffer) >= int(cfg["batch_size"]):
+            if len(replay_buffer) >= int(cfg["learning_starts"]):
                 states, actions, rewards_batch, next_states, dones = replay_buffer.sample(int(cfg["batch_size"]))
                 q_values = policy_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
                 with torch.no_grad():
-                    next_q_values = target_net(next_states).max(1).values
+                    # Double DQN: the online net selects the action, the target net evaluates it.
+                    best_next = policy_net(next_states).argmax(1, keepdim=True)
+                    next_q_values = target_net(next_states).gather(1, best_next).squeeze(1)
                     target_q_values = rewards_batch + cfg["gamma"] * next_q_values * (1.0 - dones)
-                loss = F.mse_loss(q_values, target_q_values)
+                loss = F.smooth_l1_loss(q_values, target_q_values)  # Huber: robust to large TD errors
                 optimizer.zero_grad()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(policy_net.parameters(), 5.0)
+                nn.utils.clip_grad_norm_(policy_net.parameters(), cfg["grad_clip"])
                 optimizer.step()
+                with torch.no_grad():  # Polyak soft target update
+                    for target_param, param in zip(target_net.parameters(), policy_net.parameters()):
+                        target_param.mul_(1.0 - cfg["tau"]).add_(cfg["tau"] * param)
                 history["losses"].append(float(loss.item()))
 
             if terminated:
@@ -232,9 +231,6 @@ def train(env: gym.Env, eval_env: gym.Env, cfg: Dict[str, float]) -> Tuple[Dict[
                 f"Epsilon: {epsilon:.3f} | "
                 f"Eval success: {checkpoint_success_rate:5.1f}%"
             )
-
-        if episode % int(cfg["target_update"]) == 0:
-            target_net.load_state_dict(policy_net.state_dict())
 
     training_time = time.time() - start_time
     history["training_time"] = [training_time]
